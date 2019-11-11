@@ -482,4 +482,11 @@ std::vector<Bundle> BundleContext::InstallBundles(const std::string& location)
 
   return b->coreCtx->bundleRegistry.Install(location, b);
 }
+
+std::vector<Bundle> BundleContext::InstallBundlesNew(const std::string& location) {
+  d->CheckValid();
+  auto b = (d->Lock(), d->bundle);
+
+  return b->coreCtx->bundleRegistry.InstallNew(location, b);
+}
 }

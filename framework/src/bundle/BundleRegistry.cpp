@@ -94,6 +94,114 @@ std::vector<Bundle> BundleRegistry::Install(const std::string& location,
   return Install0(location, {}, caller);
 }
 
+struct WaitCond
+{
+  std::unique_ptr<std::mutex> m;
+  std::unique_ptr<std::condition_variable> cv;
+  bool flag;
+
+  WaitCond() : m(std::make_unique<std::mutex>()), cv(std::make_unique<std::condition_variable>()), flag(false) {}
+};
+
+std::map<std::string, std::pair<unsigned int, WaitCond>> cond_map;
+
+std::vector<Bundle> BundleRegistry::InstallNew(const std::string& location,
+                                               BundlePrivate* caller)
+{
+  CheckIllegalState();
+
+  auto l = this->Lock();
+  US_UNUSED(l);
+
+  auto p = cond_map.find(location);
+  if (p == cond_map.end()) {
+
+    auto pairToInsert = std::make_pair((unsigned int)1, WaitCond{});
+    cond_map.insert(std::make_pair(location, std::move(pairToInsert)));
+    auto range = (bundles.Lock(), bundles.v.equal_range(location));
+    l.UnLock();
+    if (range.first != range.second) {
+      std::vector<Bundle> res;
+      std::vector<std::shared_ptr<BundlePrivate>> alreadyInstalled;
+      while (range.first != range.second) {
+        auto b = range.first->second;
+        alreadyInstalled.push_back(b);
+        auto bu = coreCtx->bundleHooks.FilterBundle(
+          MakeBundleContext(b->bundleContext.Load()), MakeBundle(b));
+        if (bu)
+          res.push_back(bu);
+        ++range.first;
+      }
+      l.Lock();
+      auto newBundles = Install0(location, alreadyInstalled, caller);
+
+      {
+        std::lock_guard<std::mutex>(*(cond_map[location].second.m));
+        cond_map[location].second.flag = true;
+        cond_map[location].second.cv->notify_one();
+      }
+      l.UnLock();
+      res.insert(res.end(), newBundles.begin(), newBundles.end());
+      if (res.empty()) {
+        throw std::runtime_error("All bundles rejected by a bundle hook");
+      } else {
+        l.Lock();
+        cond_map[location].first--;
+        if (cond_map[location].first == 0) {
+          cond_map.erase(location);
+        }
+        l.UnLock();
+        return res;
+      }
+    } else {
+      {
+        std::vector<Bundle> result = Install0(location, {}, caller);
+        cond_map[location].first--;
+        if (cond_map[location].first == 0) {
+          cond_map.erase(location);
+        }
+        return result;
+      }
+    }
+  } else {
+    auto iter = (bundles.Lock(), bundles.v.equal_range(location));
+    if (iter.first != bundles.v.end()) {
+      std::vector<Bundle> result;
+      while (iter.first != iter.second) {
+        auto b = iter.first->second;
+        auto bu = coreCtx->bundleHooks.FilterBundle(
+          MakeBundleContext(b->bundleContext.Load()), MakeBundle(b));
+        if (bu)
+          result.push_back(bu);
+        ++iter.first;
+      }
+      return result;
+    }
+    
+    cond_map[location].first++;
+    l.UnLock();
+    {
+      std::unique_lock<std::mutex> lock(*(cond_map[location].second.m));
+      cond_map[location].second.cv->wait(lock, [&location] { return cond_map[location].second.flag; });
+
+      cond_map[location].second.flag = false;
+      lock.unlock();
+    }
+
+    std::vector<Bundle> result;
+    auto iter2 = bundles.v.equal_range(location);
+    while (iter2.first != iter2.second) {
+      auto b = iter.first->second;
+      auto bu = coreCtx->bundleHooks.FilterBundle(
+        MakeBundleContext(b->bundleContext.Load()), MakeBundle(b));
+      if (bu)
+        result.push_back(bu);
+      ++iter2.first;
+    }
+    return result;
+  }
+}
+
 std::vector<Bundle> BundleRegistry::Install0(
   const std::string& location,
   const std::vector<std::shared_ptr<BundlePrivate>>& exclude,

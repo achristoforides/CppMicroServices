@@ -169,6 +169,25 @@ Bundle InstallLib(BundleContext frameworkCtx, const std::string& libName)
   return {};
 }
 
+Bundle InstallLibNew(BundleContext frameworkCtx, const std::string& libName)
+{
+  std::vector<Bundle> bundles;
+
+#if defined(US_BUILD_SHARED_LIBS)
+  bundles =
+    frameworkCtx.InstallBundlesNew(LIB_PATH + util::DIR_SEP + US_LIB_PREFIX +
+                                libName + US_LIB_POSTFIX + US_LIB_EXT);
+#else
+  bundles = frameworkCtx.GetBundles();
+#endif
+
+  for (auto b : bundles) {
+    if (b.GetSymbolicName() == libName)
+      return b;
+  }
+  return {};
+}
+
 void ChangeDirectory(const std::string& destdir)
 {
   errno = 0;

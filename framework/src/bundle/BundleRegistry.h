@@ -64,6 +64,9 @@ public:
   std::vector<Bundle> Install(const std::string& location,
                               BundlePrivate* caller);
 
+  std::vector<Bundle> InstallNew(const std::string& location,
+                                 BundlePrivate* caller);
+
   std::vector<Bundle> Install0(
     const std::string& location,
     const std::vector<std::shared_ptr<BundlePrivate>>& exclude,

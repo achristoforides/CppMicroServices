@@ -80,6 +80,7 @@ private:
 // Helper function to install bundles, given a framework's bundle context and the name of the library.
 // Assumes that test bundles are within the same directory during unit testing.
 Bundle InstallLib(BundleContext frameworkCtx, const std::string& libName);
+Bundle InstallLibNew(BundleContext frameworkCtx, const std::string& libName);
 
 /*
 * Change to destination directory specified by destdir
