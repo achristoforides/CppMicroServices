@@ -44,6 +44,72 @@ protected:
     framework.Stop();
     framework.WaitForStop(std::chrono::milliseconds::zero());
   }
+
+  static void ConcurrentInstallHelper(::cppmicroservices::Framework& framework,
+                               const std::vector<std::string>& bundlesToInstall)
+  {
+    using namespace cppmicroservices;
+    auto fc = framework.GetBundleContext();
+    for (size_t i = 0; i < bundlesToInstall.size(); i++) {
+      auto bundles = testing::InstallLibNew(fc, bundlesToInstall[i]);
+    }
+  }
+
+  void InstallConcurrently(benchmark::State& state, uint32_t numThreads)
+  {
+    using namespace std::chrono;
+
+    std::string bundleBasePath = "bundles\\mwbundle_";
+    auto framework = cppmicroservices::FrameworkFactory().NewFramework();
+    framework.Start();
+  
+    // Generate paths to each bundle
+    std::vector<std::string> str5kBundles;
+    for (uint32_t count = 1; count <= 5000; count++) {
+      std::string copiedBundlePath = std::string(bundleBasePath);
+      copiedBundlePath.append(std::to_string(count));// + std::string(".dll"));
+      str5kBundles.push_back(copiedBundlePath);
+    }
+
+    // Split up bundles per thread
+    std::vector<std::vector<std::string>> bundlesToInstallPerThread;
+    uint32_t currentIndex = 0;
+    for (uint32_t i = 0; i < numThreads; i++) {
+      std::vector<std::string> tempListOfBundles;
+      if (i == numThreads - 1) {
+        for (uint32_t j = 0; j < str5kBundles.size() / numThreads +
+                                   (str5kBundles.size() % numThreads);
+             j++, currentIndex++) {
+          tempListOfBundles.push_back(str5kBundles[currentIndex]);
+        }
+      } else {
+        for (uint32_t j = 0; j < str5kBundles.size() / numThreads;
+             j++, currentIndex++) {
+          tempListOfBundles.push_back(str5kBundles[currentIndex]);
+        }
+      }
+      bundlesToInstallPerThread.push_back(tempListOfBundles);
+    }
+
+    std::vector<std::thread> threads(numThreads);
+    for (auto _ : state) {
+      auto start = high_resolution_clock::now();
+      for (int i = 0; i < bundlesToInstallPerThread.size(); i++) {
+        threads[i] = std::thread(
+          ConcurrentInstallHelper, framework, bundlesToInstallPerThread[i]);
+      }
+      for (int i = 0; i < bundlesToInstallPerThread.size(); i++) {
+        threads[i].join();
+      }
+
+      auto end = high_resolution_clock::now();
+      auto elapsed_seconds = duration_cast<duration<double>>(end - start);
+      state.SetIterationTime(elapsed_seconds.count());
+    }
+
+    framework.Stop();
+    framework.WaitForStop(milliseconds::zero());
+  }
 };
 
 BENCHMARK_DEFINE_F(BundleInstallFixture, BundleInstallCppFramework)
@@ -58,74 +124,31 @@ BENCHMARK_DEFINE_F(BundleInstallFixture, LargeBundleInstallCppFramework)
   InstallWithCppFramework(state, "largeBundle");
 }
 
-BENCHMARK_DEFINE_F(BundleInstallFixture, ConcurrentBundleInstallOldCppFramework)
+BENCHMARK_DEFINE_F(BundleInstallFixture, BundleInstallConcurrentCppFramework1Thread)
 (benchmark::State& state)
 {
-  using namespace std::chrono;
-  using namespace cppmicroservices;
-
-  auto framework = cppmicroservices::FrameworkFactory().NewFramework();
-  framework.Start();
-  auto context = framework.GetBundleContext();
-
-  const std::string bundlesToInstall[10] = { "TestBundleA", "TestBundleA2",
-                                             "TestBundleB", "TestBundleC1",
-                                             "TestBundleH", "TestBundleS",
-                                             "TestBundleR", "TestBundleLQ",
-                                             "TestBundleA", "TestBundleB" };
-
-  for (auto _ : state) {
-    std::thread threads[10];
-    auto start = high_resolution_clock::now();
-    for (int i = 0; i < 10; i++) {
-      threads[i] =
-        std::thread(testing::InstallLib, context, bundlesToInstall[i]);
-    }
-    for (int i = 0; i < 10; i++) {
-      threads[i].join();
-    }
-    auto end = high_resolution_clock::now();
-    auto elapsed = duration_cast<duration<double>>(end - start);
-    state.SetIterationTime(elapsed.count());
-  }
-
-  framework.Stop();
-  framework.WaitForStop(std::chrono::milliseconds::zero());
+  InstallConcurrently(state, 1);
 }
 
-BENCHMARK_DEFINE_F(BundleInstallFixture, ConcurrentBundleInstallNewCppFramework)
+BENCHMARK_DEFINE_F(BundleInstallFixture,
+                   BundleInstallConcurrentCppFramework2Threads)
 (benchmark::State& state)
 {
-  using namespace std::chrono;
-  using namespace cppmicroservices;
+  InstallConcurrently(state, 2);
+}
 
-  auto framework = cppmicroservices::FrameworkFactory().NewFramework();
-  framework.Start();
-  auto context = framework.GetBundleContext();
+BENCHMARK_DEFINE_F(BundleInstallFixture,
+                   BundleInstallConcurrentCppFramework4Threads)
+(benchmark::State& state)
+{
+  InstallConcurrently(state, 4);
+}
 
-  const std::string bundlesToInstall[10] = { "TestBundleA", "TestBundleA2",
-                                             "TestBundleB", "TestBundleC1",
-                                             "TestBundleH", "TestBundleS",
-                                             "TestBundleR", "TestBundleLQ",
-                                             "TestBundleA", "TestBundleB" };
-
-  for (auto _ : state) {
-    std::thread threads[10];
-    auto start = high_resolution_clock::now();
-    for (int i = 0; i < 10; i++) {
-      threads[i] =
-        std::thread(testing::InstallLibNew, context, bundlesToInstall[i]);
-    }
-    for (int i = 0; i < 10; i++) {
-      threads[i].join();
-    }
-    auto end = high_resolution_clock::now();
-    auto elapsed = duration_cast<duration<double>>(end - start);
-    state.SetIterationTime(elapsed.count());
-  }
-
-  framework.Stop();
-  framework.WaitForStop(std::chrono::milliseconds::zero());
+BENCHMARK_DEFINE_F(BundleInstallFixture,
+                   BundleInstallConcurrentCppFrameworkMaxThreads)
+(benchmark::State& state)
+{
+  InstallConcurrently(state, std::thread::hardware_concurrency());
 }
 
 // Register functions as benchmark
@@ -134,8 +157,14 @@ BENCHMARK_REGISTER_F(BundleInstallFixture, BundleInstallCppFramework)
 BENCHMARK_REGISTER_F(BundleInstallFixture, LargeBundleInstallCppFramework)
   ->UseManualTime();
 BENCHMARK_REGISTER_F(BundleInstallFixture,
-                     ConcurrentBundleInstallOldCppFramework)
+                     BundleInstallConcurrentCppFramework1Thread)
   ->UseManualTime();
 BENCHMARK_REGISTER_F(BundleInstallFixture,
-                     ConcurrentBundleInstallNewCppFramework)
+                     BundleInstallConcurrentCppFramework2Threads)
+  ->UseManualTime();
+BENCHMARK_REGISTER_F(BundleInstallFixture,
+                     BundleInstallConcurrentCppFramework4Threads)
+  ->UseManualTime();
+BENCHMARK_REGISTER_F(BundleInstallFixture,
+                     BundleInstallConcurrentCppFrameworkMaxThreads)
   ->UseManualTime();
