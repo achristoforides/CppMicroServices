@@ -62,9 +62,11 @@ void BundleRegistry::Clear()
   bundles.v.clear();
 }
 
-std::vector<Bundle> BundleRegistry::InstallNew(const std::string& location,
-                                               BundlePrivate* caller)
+std::vector<Bundle> BundleRegistry::Install(const std::string& location,
+                                            BundlePrivate* caller)
 {
+  return InstallNew(location, caller);
+  /*
   CheckIllegalState();
 
   auto l = this->Lock();
@@ -92,8 +94,13 @@ std::vector<Bundle> BundleRegistry::InstallNew(const std::string& location,
     }
   }
   return Install0(location, {}, caller);
+  */
 }
 
+// OTHER_IMPL, USE_MAP_IMPL
+#define OTHER_IMPL
+
+#if defined(USE_MAP_IMPL)
 struct WaitCond
 {
   std::unique_ptr<std::mutex> m;
@@ -103,16 +110,30 @@ struct WaitCond
   WaitCond()
     : m(std::make_unique<std::mutex>())
     , cv(std::make_unique<std::condition_variable>())
-    , flag(false)
+    , flag(true)
   {}
 };
 
 std::map<std::string, std::pair<unsigned int, WaitCond>> cond_map;
 
-std::vector<Bundle> BundleRegistry::Install(const std::string& location,
-                                            BundlePrivate* caller)
+void DecrementCondMapRef(
+  cppmicroservices::detail::MutexLockingStrategy<>::UniqueLock& l,
+  const std::string& location)
 {
-#if 1
+  l.Lock();
+  cond_map[location].first--;
+  if (cond_map[location].first == 0) {
+    cond_map.erase(location);
+  }
+  l.UnLock();
+}
+#endif
+std::set<std::string> strSet;
+
+std::vector<Bundle> BundleRegistry::InstallNew(const std::string& location,
+                                               BundlePrivate* caller)
+{
+#if defined(OTHER_IMPL)
   CheckIllegalState();
 
   //auto l = this->Lock();
@@ -140,18 +161,24 @@ std::vector<Bundle> BundleRegistry::Install(const std::string& location,
     }
   }
   return Install0(location, {}, caller);
-#else
-   CheckIllegalState();
+#elif defined(USE_MAP_IMPL)
+  CheckIllegalState();
 
   auto l = this->Lock();
   US_UNUSED(l);
 
-  auto p = cond_map.find(location);
-  if (p == cond_map.end()) {
+  auto range = (bundles.Lock(), bundles.v.equal_range(location));
+  auto p = strSet.find(location);
+  if (range.first == range.second && p == strSet.end()) {
+    strSet.insert(location);
 
-    auto pairToInsert = std::make_pair((unsigned int)1, WaitCond{});
-    cond_map.insert(std::make_pair(location, std::move(pairToInsert)));
-    auto range = (bundles.Lock(), bundles.v.equal_range(location));
+    l.UnLock();
+    std::vector<Bundle> result = Install0(location, {}, caller);
+
+    l.Lock();
+    strSet.erase(location);
+    return result;
+  } else {
     l.UnLock();
     if (range.first != range.second) {
       std::vector<Bundle> res;
@@ -165,34 +192,66 @@ std::vector<Bundle> BundleRegistry::Install(const std::string& location,
           res.push_back(bu);
         ++range.first;
       }
-      l.Lock();
-      auto newBundles = Install0(location, alreadyInstalled, caller);
 
-      {
-        std::lock_guard<std::mutex>(*(cond_map[location].second.m));
-        cond_map[location].second.flag = true;
-        cond_map[location].second.cv->notify_one();
-      }
-      l.UnLock();
+      auto newBundles = Install0(location, alreadyInstalled, caller);
       res.insert(res.end(), newBundles.begin(), newBundles.end());
       if (res.empty()) {
         throw std::runtime_error("All bundles rejected by a bundle hook");
       } else {
-        l.Lock();
-        cond_map[location].first--;
-        if (cond_map[location].first == 0) {
-          cond_map.erase(location);
-        }
-        l.UnLock();
+        return res;
+      }
+    }
+  }
+
+  return {};
+#else
+  CheckIllegalState();
+
+  auto l = this->Lock();
+  US_UNUSED(l);
+
+  auto p = cond_map.find(location);
+  if (p == cond_map.end()) {
+    auto pairToInsert = std::make_pair((unsigned int)1, WaitCond{});
+    cond_map.insert(std::make_pair(location, std::move(pairToInsert)));
+    auto range = (bundles.Lock(), bundles.v.equal_range(location));
+
+    l.UnLock();
+    if (range.first != range.second) {
+      std::vector<Bundle> res;
+      std::vector<std::shared_ptr<BundlePrivate>> alreadyInstalled;
+      while (range.first != range.second) {
+        auto b = range.first->second;
+        alreadyInstalled.push_back(b);
+        auto bu = coreCtx->bundleHooks.FilterBundle(
+          MakeBundleContext(b->bundleContext.Load()), MakeBundle(b));
+        if (bu)
+          res.push_back(bu);
+        ++range.first;
+      }
+
+      auto newBundles = Install0(location, alreadyInstalled, caller);
+      {
+        std::lock_guard<std::mutex>(*(cond_map[location].second.m));
+        cond_map[location].second.flag = true;
+        cond_map[location].second.cv->notify_all();
+      }
+
+      res.insert(res.end(), newBundles.begin(), newBundles.end());
+      if (res.empty()) {
+        throw std::runtime_error("All bundles rejected by a bundle hook");
+      } else {
+        DecrementCondMapRef(l, location);
         return res;
       }
     } else {
-      l.Lock();
       std::vector<Bundle> result = Install0(location, {}, caller);
-      cond_map[location].first--;
-      if (cond_map[location].first == 0) {
-        cond_map.erase(location);
+      {
+        std::lock_guard<std::mutex>(*(cond_map[location].second.m));
+        cond_map[location].second.flag = true;
+        cond_map[location].second.cv->notify_all();
       }
+      DecrementCondMapRef(l, location);
       return result;
     }
   } else {
@@ -210,13 +269,14 @@ std::vector<Bundle> BundleRegistry::Install(const std::string& location,
       }
       return result;
     }
-    
+
     l.Lock();
     cond_map[location].first++;
     l.UnLock();
     {
       std::unique_lock<std::mutex> lock(*(cond_map[location].second.m));
-      cond_map[location].second.cv->wait(lock, [&location] { return cond_map[location].second.flag; });
+      cond_map[location].second.cv->wait(
+        lock, [&location] { return cond_map[location].second.flag; });
 
       cond_map[location].second.flag = false;
       lock.unlock();
@@ -232,6 +292,9 @@ std::vector<Bundle> BundleRegistry::Install(const std::string& location,
         result.push_back(bu);
       ++iter2.first;
     }
+
+    DecrementCondMapRef(l, location);
+
     return result;
   }
 #endif
@@ -277,6 +340,7 @@ std::vector<Bundle> BundleRegistry::Install0(
       coreCtx->listeners.BundleChanged(
         BundleEvent(BundleEvent::BUNDLE_INSTALLED, b));
     }
+
     return res;
   } catch (...) {
     for (auto& ba : barchives) {
